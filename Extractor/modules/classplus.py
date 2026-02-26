@@ -17,7 +17,6 @@ from datetime import datetime
 import pytz
 from Extractor.core.utils import forward_to_log
 import base64
-from urllib.parse import quote
 
 india_timezone = pytz.timezone('Asia/Kolkata')
 current_time = datetime.now(india_timezone)
@@ -32,9 +31,10 @@ def build_encrypted_content_url(content_id):
     """Build new Classplus signed URL endpoint using encrypted contentId."""
     if not content_id:
         return ""
+    # Keep raw Base64 chars (+, /, =) untouched to match Classplus expected format.
     return (
         "https://api.classplusapp.com/cams/uploader/video/jw-signed-url"
-        f"?contentId={quote(str(content_id), safe='')}"
+        f"?contentId={str(content_id)}"
     )
 
 @app.on_message(filters.command(["cp"]))
