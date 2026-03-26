@@ -27,14 +27,13 @@ apiurl = "https://api.classplusapp.com"
 s = cloudscraper.create_scraper() 
 
 
-def build_encrypted_content_url(content_id):
-    """Build new Classplus signed URL endpoint using encrypted contentId."""
-    if not content_id:
+def build_direct_media_url(org_id, content_id, encrypted_hash):
+    """Build direct Classplus media URL using orgId, contentId and encrypted hash."""
+    if not (org_id and content_id and encrypted_hash):
         return ""
-    # Keep raw Base64 chars (+, /, =) untouched to match Classplus expected format.
     return (
-        "https://api.classplusapp.com/cams/uploader/video/jw-signed-url"
-        f"?contentId={str(content_id)}"
+        f"https://media-cdn.classplusapp.com/{str(org_id)}/cc/{str(content_id)}/master.m3u8"
+        f"?hash_id={str(encrypted_hash)}"
     )
 
 @app.on_message(filters.command(["cp"]))
@@ -143,7 +142,11 @@ async def classplus_txt(app, message):
                             response = s.get(f"{apiurl}/v2/courses?tabCategoryId=1", headers=headers)  # Corrected indentation here
                             if response.status_code == 200:
                                 courses = response.json()["data"]["courses"]
-                                s.session_data = {"token": token, "courses": {course["id"]: course["name"] for course in courses}}
+                                s.session_data = {
+                                    "token": token,
+                                    "org_id": org_id,
+                                    "courses": {course["id"]: course["name"] for course in courses}
+                                }
                                 await fetch_batches(app, message, org_name)
                             else:
                                 await message.reply("NO BATCH FOUND ")
@@ -222,7 +225,11 @@ async def classplus_txt(app, message):
                             response = s.get(f"{apiurl}/v2/courses?tabCategoryId=1", headers=headers)  # Corrected indentation here
                             if response.status_code == 200:
                                 courses = response.json()["data"]["courses"]
-                                s.session_data = {"token": token, "courses": {course["id"]: course["name"] for course in courses}}
+                                s.session_data = {
+                                    "token": token,
+                                    "org_id": org_id,
+                                    "courses": {course["id"]: course["name"] for course in courses}
+                                }
                                 await fetch_batches(app, message, org_name)
                             
                             else:
@@ -271,7 +278,11 @@ async def classplus_txt(app, message):
                             response = s.get(f"{apiurl}/v2/courses?tabCategoryId=1", headers=headers)  # Corrected indentation here
                             if response.status_code == 200:
                                 courses = response.json()["data"]["courses"]
-                                s.session_data = {"token": token, "courses": {course["id"]: course["name"] for course in courses}}
+                                s.session_data = {
+                                    "token": token,
+                                    "org_id": org_id,
+                                    "courses": {course["id"]: course["name"] for course in courses}
+                                }
                                 await fetch_batches(app, message, org_name)
                             else:
                                 await message.reply("NO BATCH FOUND ")
@@ -299,6 +310,7 @@ async def classplus_txt(app, message):
     
             s.session_data = {
                 "token": user_input,
+                "org_id": None,
                 "courses": {course["id"]: course["name"] for course in courses}
             }
 
@@ -316,6 +328,7 @@ async def classplus_txt(app, message):
                         org_data = org_response.json().get("data", {})
                         org_id = org_data.get("orgId")
                         org_name = org_data.get("orgName")
+                        s.session_data["org_id"] = org_id
                 else:
                     org_name = shareable_link.split('//')[1].split('.')[1]
 
@@ -390,6 +403,7 @@ async def extract_batch(app, message, org_name, batch_id):
     
     if "token" in session_data:
         batch_name = session_data["courses"][batch_id]
+        org_id = session_data.get("org_id")
         headers = {
             'x-access-token': session_data["token"],
             'user-agent': 'Mobile-Android',
@@ -419,12 +433,13 @@ async def extract_batch(app, message, org_name, batch_id):
                             outputs.append(f"\n🎥 LIVE VIDEOS\n{'=' * 12}\n")
                             for video in j["data"]["list"]:
                                 name = video.get("name", "Unknown Video")
+                                content_id = video.get("id", "")
                                 video_url = video.get("url", "")
                                 content_hash = video.get("contentHashId", "")
                         
                                 if video_url or content_hash:
-                                    encrypted_link = build_encrypted_content_url(content_hash)
-                                    output_link = encrypted_link or encode_partial_url(video_url)
+                                    direct_link = build_direct_media_url(org_id, content_id, content_hash)
+                                    output_link = direct_link or encode_partial_url(video_url)
                                     outputs.append(f"🎬 {name}: {output_link}\n")
                 except Exception as e:
                     print(f"Error fetching live videos: {e}")
@@ -482,7 +497,7 @@ async def extract_batch(app, message, org_name, batch_id):
                         
                         # Use encrypted contentId endpoint for videos, keep source URL for non-videos
                         if icon == "🎬":
-                            output_link = build_encrypted_content_url(content_hash) or encode_partial_url(video_url)
+                            output_link = build_direct_media_url(org_id, sub_id, content_hash) or encode_partial_url(video_url)
                         else:
                             output_link = encode_partial_url(video_url)
 
