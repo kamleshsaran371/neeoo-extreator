@@ -18,6 +18,7 @@ import unicodedata
 import aiohttp
 from concurrent.futures import ThreadPoolExecutor
 from typing import List, Dict
+from collections import defaultdict
 import time
 
 india_timezone = pytz.timezone('Asia/Kolkata')
@@ -28,7 +29,7 @@ async def fetch_content(session, url, headers) -> dict:
     async with session.get(url, headers=headers) as response:
         return await response.json()
 
-async def process_subject_content(session, target_id, subject_id, headers, all_links: List[str], total_links: List[int]):
+async def process_subject_content(session, target_id, subject_id, subject_name, headers, subject_files: Dict[str, List[str]], total_links: List[int]):
     tasks = []
     for page in range(1, 12):
         url = f"https://api.penpencil.co/v2/batches/{target_id}/subject/{subject_id}/contents?page={page}&contentType=exercises-notes-videos"
@@ -44,7 +45,8 @@ async def process_subject_content(session, target_id, subject_id, headers, all_l
             try:
                 video_details = item.get("videoDetails", {})
                 content_id = video_details.get("findKey") if video_details else None
-                topic = clean_text(item.get("topic", ""))
+                title = item.get("topic") or item.get("name")
+                topic = clean_text(title or "")
                 url = item.get("url", "")
                 content_type = "video"
                 if item.get("lectureType"):
@@ -54,11 +56,11 @@ async def process_subject_content(session, target_id, subject_id, headers, all_l
                     if '.mpd' in url:
                         final_url, parent_id, child_id = extract_mpd_info(url, content_id, target_id)
                         line = format_content_line(topic, final_url, content_type, parent_id, child_id)
-                        all_links.append(line)
+                        subject_files[subject_name].append(line)
                         total_links[0] += 1
                     else:
                         line = format_content_line(topic, url, content_type)
-                        all_links.append(line)
+                        subject_files[subject_name].append(line)
                         total_links[0] += 1
 
                 for hw in item.get("homeworkIds", []):
@@ -73,11 +75,11 @@ async def process_subject_content(session, target_id, subject_id, headers, all_l
                                 if '.mpd' in full_url:
                                     final_url, parent_id, child_id = extract_mpd_info(full_url, hw_id, target_id)
                                     line = format_content_line(name, final_url, "notes", parent_id, child_id)
-                                    all_links.append(line)
+                                    subject_files[subject_name].append(line)
                                     total_links[0] += 1
                                 else:
                                     line = format_content_line(name, full_url, "notes")
-                                    all_links.append(line)
+                                    subject_files[subject_name].append(line)
                                     total_links[0] += 1
                         except Exception as e:
                             continue
@@ -236,7 +238,7 @@ async def pw_login(app, message):
             return
 
         batch_name = batch_map[target_id]
-        filename = f"{batch_name.replace('/', '_').replace(':', '_').replace('|', '_')}.txt"
+        clean_batch_name = batch_name.replace('/', '_').replace(':', '_').replace('|', '_')
 
         await app.send_message(
             chat_id=message.chat.id, 
@@ -259,7 +261,7 @@ async def pw_login(app, message):
 
         all_subjects_progress = {}
         total_links = [0]  # Using list to make it mutable in subfunctions
-        all_links = []
+        subject_files = defaultdict(list)
 
         async def update_progress():
             progress_text = "📊 **Extraction Progress**\n\n"
@@ -276,11 +278,11 @@ async def pw_login(app, message):
             tasks = []
             for subject in subjects:
                 si = subject.get("_id")
-                sn = clean_text(subject.get("subject", ""))
+                sn = clean_text(subject.get("subject", "") or "General")
                 all_subjects_progress[sn] = False
                 await update_progress()
                 
-                task = process_subject_content(session, target_id, si, headers, all_links, total_links)
+                task = process_subject_content(session, target_id, si, sn, headers, subject_files, total_links)
                 tasks.append(task)
             
             await asyncio.gather(*tasks)
@@ -289,14 +291,19 @@ async def pw_login(app, message):
                 all_subjects_progress[sn] = True
             await update_progress()
 
-        # Write all collected links to file
-        with open(filename, 'w', encoding='utf-8') as f:
-            for line in all_links:
-                f.write(line + "\n")
-            
-            f.write("\n━━━━━━━━━━━━━━━━━━━━━\n")
-            f.write("🌟 Join Us: @ITsGOLU_OFFICIAL\n")
-            f.write("━━━━━━━━━━━━━━━━━━━━━")
+        # Write subject-wise files
+        output_files = []
+        for subject_name, lines in subject_files.items():
+            safe_subject = clean_text(subject_name or "General")
+            filename = f"{clean_batch_name}_{safe_subject}.txt"
+            with open(filename, 'w', encoding='utf-8') as f:
+                for line in lines:
+                    f.write(line + "\n")
+
+                f.write("\n━━━━━━━━━━━━━━━━━━━━━\n")
+                f.write("🌟 Join Us: @thekmx\n")
+                f.write("━━━━━━━━━━━━━━━━━━━━━")
+            output_files.append(filename)
 
         end_time = time.time()
         extraction_time = end_time - start_time
@@ -313,8 +320,10 @@ async def pw_login(app, message):
                  f"🌐 **Jᴏɪɴ Us** : {join}\n"
                  f"❄️ **Dᴀᴛᴇ** : {time_new}")
 
-        await app.send_document(chat_id=message.chat.id, document=filename, caption=caption)
-        await app.send_document(PREMIUM_LOGS, document=filename, caption=captionn)
+        for i, file_name in enumerate(output_files):
+            file_caption = caption if i == 0 else None
+            await app.send_document(chat_id=message.chat.id, document=file_name, caption=file_caption)
+            await app.send_document(PREMIUM_LOGS, document=file_name, caption=captionn if i == 0 else None)
         await app.send_message(PREMIUM_LOGS, up)
 
     except Exception as e:
