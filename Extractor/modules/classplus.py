@@ -468,12 +468,13 @@ async def extract_batch(app, message, org_name, batch_id):
                 content_type = str(item.get("contentType"))
                 sub_id = item.get("id")
                 sub_name = item.get("name", "Untitled")
-                video_url = item.get("url", "")
-                content_hash = item.get("contentHashId", "")
+                video_url = ""
 
                 if content_type in ("2", "3"):  # Video or PDF
-                    if not video_url.lower().endswith(".pdf"):
+                    if content_type == "2":
                         video_url = await fetch_signed_url(sub_id)
+                    else:
+                        video_url = item.get("url", "")
                     if video_url:
                         # Add indentation and appropriate icon
                         indent = "  " * level
@@ -537,7 +538,7 @@ async def extract_batch(app, message, org_name, batch_id):
         pdf_count = sum(1 for line in extracted_data if "📄" in line and not line.startswith("📁"))
         image_count = sum(1 for line in extracted_data if "🖼" in line)
         folder_count = sum(1 for line in extracted_data if "📁" in line and "====" in line)
-        live_video_count = sum(1 for line in extracted_data if "🎬" in line and "contentHashId:" in line)
+        live_video_count = sum(1 for line in extracted_data if "🎬" in line and line.startswith("🎬"))
         total_links = len(extracted_data)
         other_count = total_links - (video_count + pdf_count + image_count + folder_count + live_video_count)
         
