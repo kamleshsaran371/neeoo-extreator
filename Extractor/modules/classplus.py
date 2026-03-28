@@ -50,9 +50,6 @@ def get_signed_url(input_url, token):
         if not input_url or not token:
             return None
 
-    # CASE 1: already signed
-        if "master.m3u8" in input_url and "hash_id" in input_url:
-            return input_url
 
     # FULL REQUIRED HEADERS (VERY IMPORTANT)
         headers = {
