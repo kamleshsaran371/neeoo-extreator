@@ -6,6 +6,7 @@ import time
 import asyncio
 import io
 import aiohttp
+from urllib.parse import urlparse, parse_qs
 from pyrogram import Client, filters
 import os
 from Extractor import app
@@ -44,68 +45,67 @@ async def validate_signed_url_with_curl(url):
         return 0
 
 
-async def get_signed_video_url(session, token, content_id=None, source_url=""):
-    """
-    Fetch signed URL only from Classplus official API response.
-    - If content_id is present -> use contentId + offlineDownload=false
-    - Else use source_url via ?url=
-    Retries once if API fails or URL resolves to 403.
-    """
-    endpoint = f"{apiurl}/cams/uploader/video/jw-signed-url"
-    request_headers = {
-        "x-access-token": token,
-        "region": "IN",
-        "user-agent": "Mobile-Android",
-        "app-version": "1.4.65.3",
-        "api-version": "29",
-        "device-id": "39F093FF35F201D9",
+def get_signed_url(input_url, token):
+    """Return signed URL from Classplus API using only API response."""
+    print("INPUT URL:", input_url)
+    if not input_url:
+        return None
+
+    # CASE 1: URL already has signed playback path and hash_id
+    if "master.m3u8" in input_url and "hash_id" in input_url:
+        return input_url
+
+    endpoint = "https://api.classplusapp.com/cams/uploader/video/jw-signed-url"
+    headers = {
         "accept": "application/json, text/plain, */*",
-        "cache-control": "no-cache",
-        "pragma": "no-cache",
+        "x-access-token": token,
+        "user-agent": "Mobile-Android",
+        "region": "IN"
     }
-    params = (
-        {"contentId": content_id, "offlineDownload": "false"}
-        if content_id else
-        {"url": source_url}
-    )
 
-    for attempt in range(2):
-        try:
-            async with session.get(endpoint, params=params, headers=request_headers) as response:
-                response_text = await response.text()
-                print("API RESPONSE:", response_text)
-                if response.status != 200:
-                    if attempt == 0:
-                        await asyncio.sleep(1)
-                        continue
-                    return ""
+    params = None
+    try:
+        # CASE 2: contentId present in URL query
+        if "contentId=" in input_url:
+            parsed_url = urlparse(input_url)
+            query_map = parse_qs(parsed_url.query, keep_blank_values=False)
+            content_id = query_map.get("contentId", [None])[0]
+            if not content_id:
+                return None
+            params = {"contentId": content_id, "offlineDownload": "false"}
+        # CASE 3: classplus URL without direct contentId
+        elif "classplusapp.com" in input_url:
+            params = {"url": input_url}
+        else:
+            return None
 
-                response_data = json.loads(response_text)
-                signed_url = response_data.get("url", "")
-                print("FINAL URL:", signed_url)
-                if not signed_url:
-                    if attempt == 0:
-                        await asyncio.sleep(1)
-                        continue
-                    return ""
+        response = requests.get(endpoint, headers=headers, params=params, timeout=20)
+        print("STATUS:", response.status_code)
+        print("RESPONSE:", response.text)
 
-                http_status = await validate_signed_url_with_curl(signed_url)
-                if http_status == 403:
-                    if attempt == 0:
-                        await asyncio.sleep(1)
-                        continue
-                    return ""
-                if http_status in (200, 404):
-                    return signed_url
-                return signed_url
-        except Exception as e:
-            print(f"SIGNED URL FETCH ERROR: {e}")
-            if attempt == 0:
-                await asyncio.sleep(1)
-                continue
-            return ""
+        if response.status_code != 200:
+            return None
+        response_data = response.json()
+        if "url" not in response_data:
+            return None
+        return response_data["url"]
+    except Exception as e:
+        print(f"SIGNED URL FETCH ERROR: {e}")
+        return None
 
-    return ""
+
+async def get_signed_video_url(token, content_id=None, source_url=""):
+    """
+    Async wrapper for signed URL fetch, safe for batch processing.
+    """
+    candidate_url = source_url
+    if not candidate_url and content_id:
+        candidate_url = f"https://api.classplusapp.com/?contentId={content_id}"
+        
+    signed_url = await asyncio.to_thread(get_signed_url, candidate_url, token)
+    if not signed_url and source_url and source_url != candidate_url:
+        signed_url = await asyncio.to_thread(get_signed_url, source_url, token)
+    return signed_url or ""
 
 @app.on_message(filters.command(["cp"]))
 async def classplus_txt(app, message):
@@ -523,7 +523,6 @@ async def extract_batch(app, message, org_name, batch_id):
                                 video_url = video.get("url", "")
                                 if video_url or content_id:
                                     direct_link = await get_signed_video_url(
-                                        session=session,
                                         token=session_data["token"],
                                         content_id=content_id,
                                         source_url=video_url
@@ -586,14 +585,12 @@ async def extract_batch(app, message, org_name, batch_id):
                         # Use encrypted contentId endpoint for videos, keep source URL for non-videos
                         if icon == "🎬":
                             output_link = await get_signed_video_url(
-                                session=session,
                                 token=session_data["token"],
                                 content_id=sub_id,
                                 source_url=video_url
                             )
                             if not output_link and video_url:
                                 output_link = await get_signed_video_url(
-                                    session=session,
                                     token=session_data["token"],
                                     source_url=video_url
                                 )
