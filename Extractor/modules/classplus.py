@@ -11,13 +11,10 @@ import os
 from Extractor import app
 import cloudscraper
 import concurrent.futures
-import re
-from urllib.parse import parse_qs, unquote, urlparse, urlunparse
 from config import PREMIUM_LOGS, join,BOT_TEXT
 from datetime import datetime
 import pytz
 from Extractor.core.utils import forward_to_log
-import base64
 
 india_timezone = pytz.timezone('Asia/Kolkata')
 current_time = datetime.now(india_timezone)
@@ -28,117 +25,87 @@ apiurl = "https://api.classplusapp.com"
 s = cloudscraper.create_scraper() 
 
 
-def _first_non_empty(*values):
-    for value in values:
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    return ""
-
-
-def _decode_hash_id(value):
-    if not isinstance(value, str):
-        return ""
-    return unquote(value.strip())
-
-
-def _extract_hash_id_from_url(url):
-    if not url:
-        return ""
+async def validate_signed_url_with_curl(url):
+    """Validate signed URL with curl; 200/404 are acceptable, 403 is invalid."""
     try:
-        parsed = urlparse(url)
-        params = parse_qs(parsed.query)
-        hash_values = params.get("hash_id", [])
-        return _decode_hash_id(hash_values[0]) if hash_values else ""
-    except Exception:
-        return ""
+        proc = await asyncio.create_subprocess_exec(
+            "curl", "-L", "-sS", "-o", "/dev/null", "-w", "%{http_code}", url,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, stderr = await proc.communicate()
+        if stderr:
+            print(f"CURL STDERR: {stderr.decode(errors='ignore')}")
+        status_code = stdout.decode().strip()
+        print(f"CURL STATUS: {status_code}")
+        return int(status_code) if status_code.isdigit() else 0
+    except Exception as e:
+        print(f"CURL VALIDATION ERROR: {e}")
+        return 0
 
 
-def _normalize_m3u8_url(url, fallback_hash=""):
-    """Return complete playable URL while preserving all existing query parameters."""
-    if not isinstance(url, str) or ".m3u8" not in url:
-        return ""
+async def get_signed_video_url(session, token, content_id=None, source_url=""):
+    """
+    Fetch signed URL only from Classplus official API response.
+    - If content_id is present -> use contentId + offlineDownload=false
+    - Else use source_url via ?url=
+    Retries once if API fails or URL resolves to 403.
+    """
+    endpoint = f"{apiurl}/cams/uploader/video/jw-signed-url"
+    request_headers = {
+        "x-access-token": token,
+        "region": "IN",
+        "user-agent": "Mobile-Android",
+        "app-version": "1.4.65.3",
+        "api-version": "29",
+        "device-id": "39F093FF35F201D9",
+        "accept": "application/json, text/plain, */*",
+        "cache-control": "no-cache",
+        "pragma": "no-cache",
+    }
+    params = (
+        {"contentId": content_id, "offlineDownload": "false"}
+        if content_id else
+        {"url": source_url}
+    )
 
-    parsed = urlparse(url)
-    query_parts = []
-    has_hash_id = False
+    for attempt in range(2):
+        try:
+            async with session.get(endpoint, params=params, headers=request_headers) as response:
+                response_text = await response.text()
+                print("API RESPONSE:", response_text)
+                if response.status != 200:
+                    if attempt == 0:
+                        await asyncio.sleep(1)
+                        continue
+                    return ""
 
-    if parsed.query:
-        for pair in parsed.query.split("&"):
-            if not pair:
+                response_data = json.loads(response_text)
+                signed_url = response_data.get("url", "")
+                print("FINAL URL:", signed_url)
+                if not signed_url:
+                    if attempt == 0:
+                        await asyncio.sleep(1)
+                        continue
+                    return ""
+
+                http_status = await validate_signed_url_with_curl(signed_url)
+                if http_status == 403:
+                    if attempt == 0:
+                        await asyncio.sleep(1)
+                        continue
+                    return ""
+                if http_status in (200, 404):
+                    return signed_url
+                return signed_url
+        except Exception as e:
+            print(f"SIGNED URL FETCH ERROR: {e}")
+            if attempt == 0:
+                await asyncio.sleep(1)
                 continue
-
-            if "=" in pair:
-                key, value = pair.split("=", 1)
-            else:
-                key, value = pair, ""
-
-            if key == "hash_id":
-                has_hash_id = True
-                value = _decode_hash_id(value)
-
-            query_parts.append(f"{key}={value}" if "=" in pair else key)
-
-    if fallback_hash and not has_hash_id:
-        query_parts.append(f"hash_id={_decode_hash_id(fallback_hash)}")
-
-    new_query = "&".join(query_parts)
-    return urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, new_query, parsed.fragment))
-
-
-def _find_signed_m3u8_url(payload, fallback_hash=""):
-    """
-    Recursively search API JSON for an m3u8 URL and preserve query string (hash_id, token, etc).
-    This avoids hardcoding response keys and remains compatible with API changes.
-    """
-    if isinstance(payload, dict):
-        for _, value in payload.items():
-            found = _find_signed_m3u8_url(value, fallback_hash=fallback_hash)
-            if found:
-                return found
-        return ""
-
-    if isinstance(payload, list):
-        for value in payload:
-            found = _find_signed_m3u8_url(value, fallback_hash=fallback_hash)
-            if found:
-                return found
-        return ""
-
-    if isinstance(payload, str) and ".m3u8" in payload:
-        return _normalize_m3u8_url(payload, fallback_hash=fallback_hash)
+            return ""
 
     return ""
-
-
-def build_direct_media_url(org_id, content_id, encrypted_hash, source_url="", api_payload=None):
-    """
-    Build final Classplus streaming URL.
-    Priority:
-    1) Signed m3u8 URL already present in API payload
-    2) Signed source URL (if it already contains hash_id/token query params)
-    3) Deterministic fallback URL built from org/content/hash values
-    """
-    source_hash = _extract_hash_id_from_url(source_url)
-    hash_value = _decode_hash_id(_first_non_empty(source_hash, encrypted_hash))
-    
-    signed_from_payload = _find_signed_m3u8_url(api_payload, fallback_hash=hash_value) if api_payload else ""
-    if signed_from_payload:
-        return signed_from_payload
-
-    normalized_source = _normalize_m3u8_url(source_url, fallback_hash=hash_value)
-    if normalized_source:
-        return normalized_source
-
-    if not (org_id and content_id and hash_value):
-        return ""
-
-    path_part = str(content_id)
-    if source_url:
-        match = re.search(r"/cc/([^/]+)/master\.m3u8", source_url)
-        if match and match.group(1).startswith(f"{content_id}-"):
-            path_part = match.group(1)
-            
-    return f"https://media-cdn.classplusapp.com/{org_id}/cc/{path_part}/master.m3u8?hash_id={_decode_hash_id(hash_value)}"
 
 @app.on_message(filters.command(["cp"]))
 async def classplus_txt(app, message):
@@ -507,7 +474,6 @@ async def extract_batch(app, message, org_name, batch_id):
     
     if "token" in session_data:
         batch_name = session_data["courses"][batch_id]
-        org_id = session_data.get("org_id")
         headers = {
             'x-access-token': session_data["token"],
             'user-agent': 'Mobile-Android',
@@ -519,12 +485,8 @@ async def extract_batch(app, message, org_name, batch_id):
         aiohttp_cookies = {k: v for k, v in s.cookies.get_dict().items() if v}
         
         def encode_partial_url(url):
-            """Return decoded/original URL for direct download while maintaining all video format support."""
-            if not url:
-                return ""
-            
-            # Return original URL for direct download (decoded)
-            return url
+            """Return original URL for non-video assets."""
+            return url or ""
 
         def build_request_headers(extra_headers=None):
             """
@@ -545,7 +507,7 @@ async def extract_batch(app, message, org_name, batch_id):
             return aiohttp.ClientSession(headers=request_headers, cookies=aiohttp_cookies) 
         
         async def fetch_live_videos(course_id):
-            """Fetch live videos from the API with contentHashId."""
+            """Fetch live videos from the API and resolve signed URLs per session."""
             outputs = []
             async with build_session() as session:
                 try:
@@ -559,17 +521,14 @@ async def extract_batch(app, message, org_name, batch_id):
                                 name = video.get("name", "Unknown Video")
                                 content_id = video.get("id", "")
                                 video_url = video.get("url", "")
-                                content_hash = video.get("contentHashId", "")
-                        
-                                if video_url or content_hash:
-                                    direct_link = build_direct_media_url(
-                                        org_id,
-                                        content_id,
-                                        content_hash,
-                                        video_url,
-                                        api_payload=video
+                                if video_url or content_id:
+                                    direct_link = await get_signed_video_url(
+                                        session=session,
+                                        token=session_data["token"],
+                                        content_id=content_id,
+                                        source_url=video_url
                                     )
-                                    output_link = direct_link or encode_partial_url(video_url)
+                                    output_link = direct_link or "ERROR: signed URL fetch failed"
                                     outputs.append(f"🎬 {name}: {output_link}\n")
                 except Exception as e:
                     print(f"Error fetching live videos: {e}")
@@ -598,7 +557,6 @@ async def extract_batch(app, message, org_name, batch_id):
                 sub_id = item.get("id")
                 sub_name = item.get("name", "Untitled")
                 video_url = item.get("url", "")
-                content_hash = item.get("contentHashId", "")
 
                 if content_type in ("2", "3"):  # Video or PDF
                     if video_url:
@@ -627,13 +585,20 @@ async def extract_batch(app, message, org_name, batch_id):
                         
                         # Use encrypted contentId endpoint for videos, keep source URL for non-videos
                         if icon == "🎬":
-                            output_link = build_direct_media_url(
-                                org_id,
-                                sub_id,
-                                content_hash,
-                                video_url,
-                                api_payload=item
-                            ) or encode_partial_url(video_url)
+                            output_link = await get_signed_video_url(
+                                session=session,
+                                token=session_data["token"],
+                                content_id=sub_id,
+                                source_url=video_url
+                            )
+                            if not output_link and video_url:
+                                output_link = await get_signed_video_url(
+                                    session=session,
+                                    token=session_data["token"],
+                                    source_url=video_url
+                                )
+                            if not output_link:
+                                output_link = "ERROR: signed URL fetch failed"
                         else:
                             output_link = encode_partial_url(video_url)
 
