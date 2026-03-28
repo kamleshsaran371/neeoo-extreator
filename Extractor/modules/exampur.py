@@ -16,6 +16,7 @@ from Extractor.core.utils import forward_to_log
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+@app.on_message(filters.command(["exampur"]))
 async def exampur_txt(app, message):
     try:
         start_time = datetime.now()
@@ -296,5 +297,3 @@ async def exampur_txt(app, message):
             f"Error details: <code>{str(e)}</code>\n\n"
             "Please try again or contact support."
         )
-
-
