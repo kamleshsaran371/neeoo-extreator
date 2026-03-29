@@ -387,7 +387,33 @@ async def extract_batch(app, message, org_name, batch_id):
             'api-version': '29',
             'device-id': '39F093FF35F201D9'
         }
+        signed_url_headers = {
+            "x-access-token": session_data["token"],
+            "user-agent": "Mobile-Android",
+            "app-version": "1.4.73.2",
+            "api-version": "18",
+            "device-id": "39F093FF35F201D9",
+            "region": "IN"
+        }
 
+        async def get_signed_video_url(session, content_id):
+            """Fetch signed video URL from Classplus API without manual hash generation."""
+            if not content_id:
+                return ""
+
+            signed_url_api = f"{apiurl}/cams/uploader/video/jw-signed-url"
+            signed_params = {
+                "contentId": content_id,
+                "offlineDownload": "false"
+            }
+            try:
+                async with session.get(signed_url_api, headers=signed_url_headers, params=signed_params) as signed_resp:
+                    signed_json = await signed_resp.json()
+                    return signed_json.get("url", "")
+            except Exception as e:
+                print(f"Error fetching signed URL for content {content_id}: {e}")
+                return ""
+        
         def encode_partial_url(url):
             """Return decoded/original URL for direct download while maintaining all video format support."""
             if not url:
@@ -409,8 +435,8 @@ async def extract_batch(app, message, org_name, batch_id):
                             outputs.append(f"\n🎥 LIVE VIDEOS\n{'=' * 12}\n")
                             for video in j["data"]["list"]:
                                 name = video.get("name", "Unknown Video")
-                                video_url = video.get("url", "")
-                                content_hash = video.get("contentHashId", "")
+                                content_id = video.get("id")
+                                video_url = await get_signed_video_url(session, content_id)
                         
                                 if video_url:
                                     # Use original URL for direct download
@@ -444,38 +470,33 @@ async def extract_batch(app, message, org_name, batch_id):
                 sub_id = item.get("id")
                 sub_name = item.get("name", "Untitled")
                 video_url = item.get("url", "")
-                content_hash = item.get("contentHashId", "")
+                
 
-                if content_type in ("2", "3"):  # Video or PDF
-                    if video_url:
-                        # Add indentation and appropriate icon
-                        indent = "  " * level
-                        
-                        # Check if it's a video file (including DRM and special cases)
-                        video_extensions = ('.m3u8', '.mp4', '.mpd', '.avi', '.mov', '.wmv', '.flv', '.webm')
-                        is_video = (video_url.lower().endswith(video_extensions) or 
-                                   "playlist.m3u8" in video_url or 
-                                   "master.m3u8" in video_url or
-                                   "classplusapp.com/drm" in video_url or
-                                   "testbook.com" in video_url)
-                        
+                # Add indentation and appropriate icon
+                    indent = "  " * level
+
+                    if content_type == "2":
+                        icon = "🎬"
+                        signed_url = await get_signed_video_url(session, sub_id)
+                        if not signed_url:
+                            continue
+                        decoded_url = encode_partial_url(signed_url)
+                    else:
+                        if not video_url:
+                            continue
                         if video_url.lower().endswith('.pdf'):
                             icon = "📄"
-                            # Remove .pdf from name if present
                             if sub_name.endswith('.pdf'):
                                 sub_name = sub_name[:-4]
-                        elif is_video:
-                            icon = "🎬"
                         elif video_url.lower().endswith(('.jpg', '.jpeg', '.png', '.gif', '.webp')):
                             icon = "🖼"
                         else:
                             icon = "📄"
-                        
-                        # Use original URL for direct download
                         decoded_url = encode_partial_url(video_url)
-                        # Format vertically - each item on its own line (no hash appended)
-                        full_info = f"{indent}{icon} {sub_name}: {decoded_url}\n"
-                        result.append(full_info)
+                    
+                    # Format vertically - each item on its own line
+                    full_info = f"{indent}{icon} {sub_name}: {decoded_url}\n"
+                    result.append(full_info)
 
                 elif content_type == "1":  # Folder
                     new_folder_path = f"{folder_path}{sub_name} - "
